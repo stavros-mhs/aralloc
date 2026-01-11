@@ -30,7 +30,7 @@ I learnt about memory arenas and [stb signle-file libraries](https://github.com/
 
 This is a learning project I'm actively using. Expect:
 
-- Bugs and Changes.
+- Bugs and changes
 - Possible API changes
 - Maybe test/examples someday
 
