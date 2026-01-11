@@ -1,7 +1,7 @@
 /* arena.h - v0.1 - public domain memory arena allocator
     DEPENDENCIES:
         - Requires <string.h> for memcpy
-        - Requires <sys/mman.h> for mmap/munamp
+        - Requires <sys/mman.h> for mmap/munmap
         - POSIX systems _only_
         - NOT compatible with Windows
 
