@@ -1,7 +1,8 @@
 /* arena.h - v0.1 - public domain memory arena allocator
     DEPENDENCIES:
-        - POSIX systems _only_
+        - Requires <string.h> for memcpy
         - Requires <sys/mman.h> for mmap/munamp
+        - POSIX systems _only_
         - NOT compatible with Windows
 
     Do this:
@@ -35,17 +36,19 @@
 extern "C" {
 #endif
 
-// ==============
-// HEADER SECTION
-// ==============
+// ============================
+//        HEADER SECTION
+// ============================
+
+#include <stddef.h>
 
 typedef struct Arena Arena;
 
 // Public API declarations
 Arena* arinit(void);
-void   arfree(Arena* arena);
-void*  aralloc(Arena* arena, size_t size);
-void   arreset(Arena* arena);
+int arfree(Arena* arena);
+void* aralloc(Arena* arena, size_t size);
+void arreset(Arena* arena);
 
 #ifdef __cplusplus
 }
@@ -53,32 +56,103 @@ void   arreset(Arena* arena);
 
 #endif // ARENA_H
 
-// ======================
-// IMPLEMENTATION SECTION
-// ======================
+// ============================================
+//           IMPLEMENTATION SECTION
+// ============================================
 
 #ifdef ARENA_IMPLEMENTATION
+
+#include <sys/mman.h>
+#include <string.h>
+
+#define PAGE_SIZE 4096
 
 struct Arena {
     char *memory;
     size_t capacity;
     size_t offset;
+};
+
+struct Arena *arinit(void) {
+    void *arptr = mmap(NULL, sizeof(struct Arena),
+                        PROT_READ | PROT_WRITE,
+                        MAP_PRIVATE | MAP_ANONYMOUS,
+                        -1, 0);
+
+    if (arptr == MAP_FAILED) return NULL;
+
+    void *arcapacity = mmap(NULL, PAGE_SIZE,
+                    PROT_READ | PROT_WRITE,
+                    MAP_PRIVATE | MAP_ANONYMOUS,
+                    -1, 0);
+
+    if (arcapacity == MAP_FAILED) return NULL;
+
+    struct Arena *arena = (struct Arena *)arptr;
+
+    arena->memory = (char *)arcapacity ;
+    arena->capacity = PAGE_SIZE;
+    arena->offset = 0;
+
+    return arena;
 }
 
-Arena* arinit(void) {
-    // Implementation here
-}
+int arfree(Arena* arena) {
+    if (!arena) return -1;
 
-void arfree(Arena* arena) {
-    // Implementation here
+    // munmap failed
+    if (munmap(arena->memory, arena->capacity) == -1)
+        return -1;
+
+    // munmap failed
+    if (munmap (arena, PAGE_SIZE) == -1)
+        return -1;
+
+    return 0;
 }
 
 void *aralloc(Arena* arena, size_t size) {
-    // Implementation here
+    if (!arena) return NULL;
+
+    if (arena->offset + size <= arena->capacity) {
+        void *ptr = arena->memory + arena->offset;
+        
+        arena->offset += size;
+
+        return ptr;
+    } else {
+        size_t new_capacity = arena->capacity * 2;
+
+        while (new_capacity < arena->offset + size) {
+            new_capacity *= 2;
+        }
+
+        void *new_mem = mmap (NULL, new_capacity,
+                            PROT_READ | PROT_WRITE,
+                            MAP_PRIVATE | MAP_ANONYMOUS,
+                            -1, 0);
+
+        // failed to extend the arena
+        if (new_mem == MAP_FAILED) {
+            return NULL;
+        }
+
+        memcpy(new_mem, arena->memory, arena->offset);        
+        munmap(arena->memory, arena->capacity);
+
+        arena->memory = new_mem;
+        arena->capacity = new_capacity;
+
+        void *ptr = arena->memory + arena->offset;
+        arena->offset += size;
+
+        return ptr;
+    }
 }
 
 void arreset(Arena* arena) {
-    // Implementation here
+    if (!arena) return;
+    arena->offset = 0;
 }
 
 #endif // ARENA_IMPLEMENTATION
