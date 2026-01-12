@@ -1,6 +1,6 @@
 /* arena.h - v0.1 - public domain memory arena allocator
     DEPENDENCIES:
-	- Requires <stdlib.h> for malloc
+	- Requires <stdlib.h> for malloc/free
         - Requires <sys/mman.h> for mmap/munmap
         - POSIX systems _only_
         - NOT compatible with Windows

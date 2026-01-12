@@ -2,13 +2,20 @@
 
 ### Dependencies
 ```c
-#include<string.h> // for memcpy
+#include<stlib.h> // for malloc/free
 #include<sys/mman.h> // for mmap/munmap
 ```
 
 ### API
 ```c
-Arena* arinit(void);
+typedef struct Arena Arena;
+
+typedef enum {
+	AR_FIXED,
+	AR_DYNAMIC,
+} ArenaType;
+
+Arena* arinit(ArenaType type);
 void* aralloc(Arena*, size_t);
 void arreset(Arena*);
 int arfree(Arena*);
@@ -16,7 +23,7 @@ int arfree(Arena*);
 
 ### Documentation
 
-You can find some basic documentation near the start of `arena.h` but to be honest, the whole implementation is ~100 lines. You can read all of it in a matter of minutes and it should be easy to understand what's going on if you're familiar with how mmap works.
+You can find documentation at the start of `arena.h`.
 
 ### When to use
 
