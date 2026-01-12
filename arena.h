@@ -1,13 +1,79 @@
 /* arena.h - v0.1 - public domain memory arena allocator
     DEPENDENCIES:
-        - Requires <string.h> for memcpy
+	- Requires <stdlib.h> for malloc
         - Requires <sys/mman.h> for mmap/munmap
         - POSIX systems _only_
         - NOT compatible with Windows
 
-    Do this:
-        #define ARENA_IMPLEMENTATION
-    before you include this file in *one* C or C++ file to create the implementation
+    API DOCUMENTATION:
+	### Arena Types
+    	Two types of memory arenas are supported:
+
+	- AR_FIXED: Fixed-size arena (64KB by default)
+	    * When capacity is reached, new allocations fail
+
+	- AR_DYNAMIC:
+	    * Allocates memory in chunks
+	    * When current chunk reaches capacity limit a new chunk gets created
+	    * Chunk capacity doubles with each expansion
+	    * All previous allocations remain valid
+	    * Starts at 4KB
+
+	### API
+	struct Arena *arinit(ArenaType type);
+		Initializes an arena of <type>.
+
+		Parameters:
+		- type: AR_FIXED or AR_DYNAMIC
+
+		Returns:
+		- Pointer to initialed arena on success.
+		- NULL on failure.
+
+		Notes:
+		- AR_FIXED arenas start with 64KB of memory (16 pages)
+		- AR_DYNAMIC arenas starts with 4KB (1 page) and grow as needed.
+
+	void arfree(Arena* arena);
+		Used to deallocate an arena.
+
+		Parameters:
+		- arena: Poitnter to arena to free
+
+		Notes:
+		- aralloc-ated variables become invalid.
+
+	void* aralloc(Arena* arena, size_t size);
+		Allocates memory from the arena.
+
+		Parameters:
+		- arena: pointer to the arena
+		- size: number of bytes to allocate
+
+		Returns:
+		- Pointer to allocated memory on success.
+		- NULL on failure (arena full for AR_FIXED, or out of memory).
+
+		Notes:
+		- All allocations are 16-byte aligned.
+		- For AR_DYNAMIC, allocations may cause expansion.
+
+	void arreset(Arena* arena);
+		Resets the arena to initial state
+
+		Parameters:
+		- arena: pointer to arena to reset.
+
+		Notes:
+		- AR_FIXED: offeset is set to 0
+		- AR_DYNAMIX: Rewinds all chunk offsets, _keeps all chunks_.
+		- Allocation on a reset arena overwrite previously allocated
+		  data. Accessing such data is _undefined behavior_.
+
+    USAGE:
+    	Do this: #define ARENA_IMPLEMENTATION
+    	before you include this file in *one* C or C++ file
+	to create the implementation
 
     // i.e. it should look like this:
     #include ..
@@ -17,28 +83,12 @@
     #define ARENA_IMPLEMENTATION
     #include "arena.h"
     ..
+	Arena *arena = arinit(AR_FIXED); // or Arena *arena = arinit(AR_DYNAMIC)
+	struct my_struct *new_struct = aralloc(arena, sizeof(my_struct));
+	arfree(arena);
+	arreset(arena);
 
-    USAGE:
-
-    Arena *arena = arinit();
-    void *ptr = aralloc(arena, 1024);
-    arfree(arena);
-
-    // arreset sets offset to 0. following  aralloc() calls
-    // will overwrite previous data, using memory without allocating anew
-    arreset(arena);
-
-    IMPORTANT
-    - arinit() returns NULL if the arena couldn't be allocated 
-    - arfree() returns -1 if it couldn't free the arena
-    - arreset() returns -1 if it was not given an arena
-    - aralloc() returns a pointer to the newly allocated item on success
-                returns NULL if it was not given an arena or if it could
-                extend the arena. 
-
-    LICENSE:
-
-    See end of file for license information.
+    LICENSE: See end of file for license information.
 */
 
 #ifndef ARENA_H
@@ -56,9 +106,14 @@ extern "C" {
 
 typedef struct Arena Arena;
 
+typedef enum {
+	AR_FIXED,
+	AR_DYNAMIC,
+} ArenaType;
+
 // Public API declarations
-Arena* arinit(void);
-int arfree(Arena* arena);
+struct Arena *arinit(ArenaType type);
+void arfree(Arena* arena);
 void* aralloc(Arena* arena, size_t size);
 void arreset(Arena* arena);
 
@@ -75,97 +130,158 @@ void arreset(Arena* arena);
 #ifdef ARENA_IMPLEMENTATION
 
 #include <sys/mman.h>
-#include <string.h>
+#include <stdlib.h>
 
 #define PAGE_SIZE 4096
 
-struct Arena {
-    char *memory;
-    size_t capacity;
-    size_t offset;
+// ensures every arena allocation is a multiple of 16 bytes
+#define AR_ALIGN 16
+#define AR_ALIGN_UP(n) (((n) + AR_ALIGN -1) & ~(AR_ALIGN - 1))
+
+// ==========================================
+// 		CHUNK HANDLING
+// ==========================================
+
+struct Chunk {
+	char *memory;
+	size_t capacity;
+	size_t offset;
+	struct Chunk *next;
 };
 
-struct Arena *arinit(void) {
-    void *arptr = mmap(NULL, sizeof(struct Arena),
-                        PROT_READ | PROT_WRITE,
-                        MAP_PRIVATE | MAP_ANONYMOUS,
-                        -1, 0);
+struct Chunk *chunk_init(ArenaType type, size_t size) {
+	if (type != AR_FIXED && type != AR_DYNAMIC) return NULL;
 
-    if (arptr == MAP_FAILED) return NULL;
+	struct Chunk* new_chunk = malloc(sizeof(struct Chunk));
 
-    void *arcapacity = mmap(NULL, PAGE_SIZE,
-                    PROT_READ | PROT_WRITE,
-                    MAP_PRIVATE | MAP_ANONYMOUS,
-                    -1, 0);
+	// can't allocate memory chunk
+	if (!new_chunk) return NULL;
 
-    if (arcapacity == MAP_FAILED) return NULL;
+	new_chunk->memory = mmap(NULL, size,
+                        	PROT_READ | PROT_WRITE,
+                        	MAP_PRIVATE | MAP_ANONYMOUS,
+                        	-1, 0);
 
-    struct Arena *arena = (struct Arena *)arptr;
+	// new chunk has no memory, raise nomem error
+	if (new_chunk->memory == MAP_FAILED) {
+		free(new_chunk);
+		return NULL;
+	}
 
-    arena->memory = (char *)arcapacity ;
-    arena->capacity = PAGE_SIZE;
-    arena->offset = 0;
+	new_chunk->capacity = size;
+	new_chunk->offset = 0;
+	new_chunk->next = NULL;
 
-    return arena;
+	return new_chunk;
 }
 
-int arfree(Arena* arena) {
-    if (!arena) return -1;
+void chunk_destroy (struct Chunk *chunk) {
+	while (chunk) {
+		struct Chunk *next = chunk->next;
 
-    // munmap failed
-    if (munmap(arena->memory, arena->capacity) == -1)
-        return -1;
+		munmap(chunk->memory, chunk->capacity);
 
-    // munmap failed
-    if (munmap (arena, PAGE_SIZE) == -1)
-        return -1;
+		free(chunk);
+		chunk = next;
+	}
+	return;
+}
+// CHUNK HANDLING
 
-    return 0;
+
+// ==========================================
+// 		ARENA HANDLING
+// ==========================================
+struct Arena {
+	ArenaType type;
+    	struct Chunk *head;
+    	struct Chunk *curr;
+};
+
+struct Arena *arinit (ArenaType type) {
+	if (type != AR_FIXED && type != AR_DYNAMIC) return NULL;
+
+	struct Arena *new_arena = malloc(sizeof(struct Arena));
+
+	if (!new_arena) return NULL;
+
+	new_arena->type = type;
+
+	size_t init_size = (type == AR_FIXED) ? PAGE_SIZE * 16 : PAGE_SIZE;
+
+	new_arena->head = new_arena->curr = chunk_init(type, init_size);
+
+	if (!new_arena->head) {
+		free(new_arena);
+		return NULL;
+	}
+
+	return new_arena;
+}
+
+void arfree(Arena* arena) {
+	chunk_destroy(arena->head);
+	free(arena);
 }
 
 void *aralloc(Arena* arena, size_t size) {
-    if (!arena) return NULL;
+	if (!arena) return NULL;
 
-    if (arena->offset + size <= arena->capacity) {
-        void *ptr = arena->memory + arena->offset;
-        
-        arena->offset += size;
+	size = AR_ALIGN_UP(size);
 
-        return ptr;
-    } else {
-        size_t new_capacity = arena->capacity * 2;
+	if (arena->curr->offset + size <= arena->curr->capacity) {
+		void *ptr = arena->curr->memory + arena->curr->offset;
+		arena->curr->offset += size;
 
-        while (new_capacity < arena->offset + size) {
-            new_capacity *= 2;
-        }
+		return ptr;
+	}
 
-        void *new_mem = mmap (NULL, new_capacity,
-                            PROT_READ | PROT_WRITE,
-                            MAP_PRIVATE | MAP_ANONYMOUS,
-                            -1, 0);
+	// Not enough space in chunk
+	if (arena->type == AR_FIXED) return NULL;
 
-        // failed to extend the arena
-        if (new_mem == MAP_FAILED) {
-            return NULL;
-        }
+	if (arena->type == AR_DYNAMIC) {
+		size_t next_size = arena->curr->capacity * 2;
 
-        memcpy(new_mem, arena->memory, arena->offset);        
-        munmap(arena->memory, arena->capacity);
+		if (next_size < size) {
+			next_size = AR_ALIGN_UP(size);
+		}
 
-        arena->memory = new_mem;
-        arena->capacity = new_capacity;
+		struct Chunk* new_chunk = chunk_init(AR_DYNAMIC, next_size);
 
-        void *ptr = arena->memory + arena->offset;
-        arena->offset += size;
+		if(!new_chunk) return NULL;
 
-        return ptr;
-    }
+		arena->curr->next = new_chunk;
+		arena->curr = arena->curr->next;
+
+		void *ptr = arena->curr->memory + arena->curr->offset;
+		arena->curr->offset += size;
+		return ptr;
+	}
+
+	return NULL;
 }
 
 void arreset(Arena* arena) {
-    if (!arena) return;
-    arena->offset = 0;
+	if (!arena) return;
+
+	if (arena->type == AR_FIXED) {
+		arena->head->offset = 0;
+		return;
+	}
+
+	if(arena->type == AR_DYNAMIC) {
+		struct Chunk *curr = arena->head;
+		while (curr) {
+			curr->offset =0;
+			curr = curr->next;
+		}
+
+		arena->curr = arena->head;
+		return;
+	}
 }
+
+// ARENA HANDLING
 
 #endif // ARENA_IMPLEMENTATION
 
