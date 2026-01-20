@@ -131,6 +131,7 @@ void arreset(Arena* arena);
 
 #include <sys/mman.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 #define PAGE_SIZE 4096
 
@@ -172,19 +173,13 @@ struct Chunk *chunk_init(ArenaType type, size_t size) {
 	new_chunk->offset = 0;
 	new_chunk->next = NULL;
 
+	printf("Allocated new Chunk w/ capacity %ld\n", new_chunk->capacity);
 	return new_chunk;
 }
 
 void chunk_destroy (struct Chunk *chunk) {
-	while (chunk) {
-		struct Chunk *next = chunk->next;
-
-		munmap(chunk->memory, chunk->capacity);
-
-		free(chunk);
-		chunk = next;
-	}
-	return;
+	munmap(chunk->memory, chunk->capacity);
+	free(chunk);
 }
 // CHUNK HANDLING
 
@@ -194,8 +189,8 @@ void chunk_destroy (struct Chunk *chunk) {
 // ==========================================
 struct Arena {
 	ArenaType type;
-    	struct Chunk *head;
-    	struct Chunk *curr;
+    struct Chunk *head;
+    struct Chunk *curr;
 };
 
 struct Arena *arinit (ArenaType type) {
@@ -220,7 +215,14 @@ struct Arena *arinit (ArenaType type) {
 }
 
 void arfree(Arena* arena) {
-	chunk_destroy(arena->head);
+	struct Chunk *cursor = arena->head;
+
+	while (cursor->next != NULL) {
+		chunk_destroy(cursor);
+
+		cursor=cursor->next;
+	}
+	chunk_destroy(cursor);
 	free(arena);
 }
 
